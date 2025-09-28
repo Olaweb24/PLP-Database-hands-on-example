@@ -226,3 +226,289 @@ sudo chmod -R 750 /var/lib/mysql
 ```sql
 sudo systemctl start mysql
 ```
+
+
+README.md
+
+@@ -0,0 +1,17 @@
+## 📝 Scenario-Based Lab
+You have been hired as a Database Administrator in the hotel industry. Your manager has tasked you with developing a system that can help predict hotel room prices based on weather forecast data.
+
+Your responsibilities include:
+
+1.**Database Setup** – Store daily weather forecast data (temperature, humidity, and other relevant parameters) in a MySQL database hosted locally.
+
+2.**Data Utilization** – Use the stored weather data to generate predictions of hotel room prices.
+
+3.**Dashboard Development** – Create a dashboard that displays:
+- Daily weather forecasts (temperature and humidity).
+- Predicted hotel room prices based on the forecast.
+
+The final solution should allow hotel management to easily monitor weather conditions and make data-driven pricing decisions.
+
+### Architecture diagram
+<img width="871" height="301" alt="db" src="https://github.com/user-attachments/assets/c5201a3b-513b-49e5-bf37-8fcbd95ce377" />
+
+dashboard.py
+
+@@ -0,0 +1,101 @@
+import streamlit as st
+import pymysql
+import pandas as pd
+import os
+from dotenv import load_dotenv
+from datetime import datetime
+
+load_dotenv()
+
+DB_CONFIG = {
+    "host": os.getenv("DB_HOST", "localhost"),
+    "user": os.getenv("DB_USER", "root"),
+    "password": os.getenv("DB_PASS", ""),
+    "database": os.getenv("DB_NAME", "hotel")
+}
+
+def calculate_price(base_price, weather_main):
+    weather_main = weather_main.lower()
+    if weather_main in ["rain", "thunderstorm"]:
+        return base_price * 1.2  
+    elif weather_main in ["clouds", "mist"]:
+        return base_price * 1.1  
+    else:
+        return base_price     
+
+@st.cache_data
+def load_data():
+    conn = pymysql.connect(**DB_CONFIG)
+    query = """
+        SELECT datetime, temp, temp_min, temp_max, humidity, 
+               weather_main, weather_description, weather_icon
+        FROM weather_forecast
+        ORDER BY datetime ASC
+    """
+    df = pd.read_sql(query, conn)
+    conn.close()
+
+    if df.empty:
+        return df
+
+    df["datetime"] = pd.to_datetime(df["datetime"])
+    df["date"] = df["datetime"].dt.date
+    return df
+
+st.set_page_config(page_title="Nairobi Weather Dashboard", layout="wide")
+st.title("🌤️ Nairobi Weather & Dynamic Hotel Pricing Dashboard")
+
+df = load_data()
+
+if df.empty:
+    st.warning("⚠️ No forecast data found in the database. Please run your fetch script first.")
+else:
+    daily = (
+        df.groupby("date")
+        .agg({
+            "temp_min": "min",
+            "temp_max": "max",
+            "humidity": "mean",
+            "weather_main": "first",
+            "weather_description": "first",
+            "weather_icon": "first"
+        })
+        .reset_index()
+    )
+
+    base_price = 1000  
+    daily["price"] = daily["weather_main"].apply(lambda w: calculate_price(base_price, w))
+    today_price = daily.loc[daily["date"] == daily["date"].min(), "price"].iloc[0]
+    st.markdown(
+        f"""
+        <div style="background-color:#f0f8ff;padding:15px;border-radius:10px;
+                    text-align:center;font-size:20px;font-weight:bold;
+                    border:2px solid #1e90ff;">
+            🏨 Today's Booking Price: 💲 {today_price:.2f}
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    st.subheader("🌍 Daily Weather & 🏨 Hotel Pricing")
+    cols = st.columns(4) 
+    for i, row in daily.iterrows():
+        with cols[i % 4]:
+            st.markdown(f"**{row['date']}**")
+            icon_url = f"http://openweathermap.org/img/wn/{row['weather_icon']}@2x.png"
+            st.image(icon_url, width=80)
+            st.caption(f"{row['weather_description'].capitalize()}")
+            st.write(f"🌡️ {row['temp_min']}°C - {row['temp_max']}°C")
+            st.write(f"💧 {round(row['humidity'],1)}% humidity")
+            st.success(f"💲 Price: {row['price']:.2f}")
+    st.subheader("📊 Daily Temperature Forecast")
+    st.bar_chart(
+        daily.set_index("date")[["temp_min", "temp_max"]]
+    )
+
+    st.subheader("💧 Daily Humidity Forecast")
+    st.line_chart(
+        daily.set_index("date")[["humidity"]]
+    )
+    st.subheader("🔎 Raw Forecast Data")
+    st.dataframe(df)
+
+
+main.py
+@@ -0,0 +1,109 @@
+import requests
+import os
+import pymysql
+from dotenv import load_dotenv 
+
+load_dotenv()
+
+API_KEY = os.getenv("API_KEY")
+CITY = "Nairobi"
+BASE_URL = f"http://api.openweathermap.org/data/2.5/forecast?q={CITY}&appid={API_KEY}&units=metric"
+
+DB_CONFIG = {
+    "host": os.getenv("DB_HOST", "localhost"),
+    "user": os.getenv("DB_USER", "root"),
+    "password": os.getenv("DB_PASS", ""),
+    "database": os.getenv("DB_NAME", "weatherDB"),
+    "cursorclass": pymysql.cursors.DictCursor
+}
+
+def create_table(cursor):
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS weather_forecast (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            city_id INT,
+            city_name VARCHAR(100),
+            country VARCHAR(10),
+            datetime DATETIME,
+            temp FLOAT,
+            temp_min FLOAT,
+            temp_max FLOAT,
+            feels_like FLOAT,
+            pressure INT,
+            humidity INT,
+            weather_main VARCHAR(50),
+            weather_description VARCHAR(100),
+            weather_icon VARCHAR(10),
+            clouds INT,
+            rain FLOAT,
+            UNIQUE KEY uniq_forecast (city_id, datetime)
+        )
+    """)
+
+def weather_data():
+    response = requests.get(BASE_URL)
+    if response.status_code == 200:
+        data = response.json()
+        forecasts = []
+        for entry in data.get("list", []):
+            forecasts.append({
+                "city_id": data["city"]["id"],
+                "city_name": data["city"]["name"],
+                "country": data["city"]["country"],
+                "datetime": entry["dt_txt"],
+                "temp": entry["main"]["temp"],
+                "temp_min": entry["main"]["temp_min"],
+                "temp_max": entry["main"]["temp_max"],
+                "feels_like": entry["main"]["feels_like"],
+                "pressure": entry["main"]["pressure"],
+                "humidity": entry["main"]["humidity"],
+                "weather_main": entry["weather"][0]["main"],
+                "weather_description": entry["weather"][0]["description"],
+                "weather_icon": entry["weather"][0]["icon"],
+                "clouds": entry["clouds"]["all"],
+                "rain": entry.get("rain", {}).get("3h", 0)
+            })
+        return forecasts
+    else:
+        print("Error fetching data:", response.status_code)
+        return []
+
+def save_to_mysql(forecasts):
+    conn = pymysql.connect(**DB_CONFIG)
+    cursor = conn.cursor()
+    create_table(cursor)
+
+    sql = """
+        INSERT INTO weather_forecast (
+            city_id, city_name, country, datetime, temp, temp_min, temp_max,
+            feels_like, pressure, humidity, weather_main, weather_description,
+            weather_icon, clouds, rain
+        ) VALUES (
+            %(city_id)s, %(city_name)s, %(country)s, %(datetime)s, %(temp)s, %(temp_min)s, %(temp_max)s,
+            %(feels_like)s, %(pressure)s, %(humidity)s, %(weather_main)s, %(weather_description)s,
+            %(weather_icon)s, %(clouds)s, %(rain)s
+        )
+        ON DUPLICATE KEY UPDATE
+            temp=VALUES(temp),
+            temp_min=VALUES(temp_min),
+            temp_max=VALUES(temp_max),
+            feels_like=VALUES(feels_like),
+            pressure=VALUES(pressure),
+            humidity=VALUES(humidity),
+            weather_main=VALUES(weather_main),
+            weather_description=VALUES(weather_description),
+            weather_icon=VALUES(weather_icon),
+            clouds=VALUES(clouds),
+            rain=VALUES(rain)
+    """
+
+    cursor.executemany(sql, forecasts)
+    conn.commit()
+    cursor.close()
+    conn.close()
+    print(f"Inserted {len(forecasts)} records into weather_forecast table.")
+
+if __name__ == "__main__":
+    forecasts = weather_data()
+    if forecasts:
+        save_to_mysql(forecasts)
+
+
+requirements.txt
+
+@@ -0,0 +1,40 @@
+altair==5.5.0
+attrs==25.3.0
+blinker==1.9.0
+cachetools==6.2.0
+certifi==2025.8.3
+charset-normalizer==3.4.3
+click==8.2.1
+colorama==0.4.6
+gitdb==4.0.12
+GitPython==3.1.45
+idna==3.10
+Jinja2==3.1.6
+jsonschema==4.25.1
+jsonschema-specifications==2025.9.1
+MarkupSafe==3.0.2
+narwhals==2.4.0
+numpy==2.2.6
+packaging==25.0
+pandas==2.3.2
+pillow==11.3.0
+protobuf==6.32.0
+pyarrow==21.0.0
+pydeck==0.9.1
+PyMySQL==1.1.2
+python-dateutil==2.9.0.post0
+python-dotenv==1.1.1
+pytz==2025.2
+referencing==0.36.2
+requests==2.32.5
+rpds-py==0.27.1
+six==1.17.0
+smmap==5.0.2
+streamlit==1.49.1
+tenacity==9.1.2
+toml==0.10.2
+tornado==6.5.2
+typing_extensions==4.15.0
+tzdata==2025.2
+urllib3==2.5.0
+watchdog==6.0.0
+
